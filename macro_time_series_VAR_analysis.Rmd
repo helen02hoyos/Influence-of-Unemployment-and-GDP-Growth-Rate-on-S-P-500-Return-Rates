@@ -1,0 +1,276 @@
+---
+title: "Influence of Unemployment and GDP Growth Rate on S&P 500 Return Rates"
+author: "Helen Hoyos"
+date: "2025-04-25"
+output: 
+  pdf_document:
+    latex_engine: xelatex
+    keep_tex: true
+fontsize: 12pt
+linestretch: 2
+mainfont: Times New Roman 
+---
+\newpage
+
+
+### \hspace*{2em} In this paper I will analyze the relationship between a change in the unemployment rate and the GDP growth rate on the US stock market which will be measured using the S&P 500 returns as a rate. Analyzing macroeconomic indicators such as the unemployment rate and the GDP growth rate is important to understand how expectations can influence changes in the actual stock market return. I will use methods such as vector autoregressions (VAR) and structural VAR with Cholesky decomposition to check for relationships. This will help us understand how a shock in the unemployment rate or GDP growth affects the S&P 500. This will also help us understand whether the shock is instant and long lasting or not.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, include=FALSE}
+library(timetk)
+library(tidyquant)
+library(tibbletime)
+library(scales)
+library(ggfortify)
+library(egg)
+library(tsibble)
+library(vars)
+library(forecast)
+library(dplyr)
+library(urca)
+library(purrr)
+library(tidyr)
+library(qqplotr)
+library(tibble)
+library(knitr)
+library(ggplot2)
+library(zoo)
+library(broom)
+library(stringr)
+library(gridExtra)
+library(patchwork)
+```
+
+```{r, echo= FALSE, warning=FALSE}
+# (a) Obtain multiple time series data with linear dependencies from any available online source. Explain the linear dependencies/relationship you expect in your time series data
+
+# Import data
+data <- tq_get(c("UNRATE", "GDP"), 
+               get = "economic.data",
+               from = "1959-01-01",
+               to = "2025-02-01") %>%
+  mutate(qtryear = as.yearqtr(date)) %>%
+  group_by(qtryear, symbol) %>%
+  summarise(value = mean(price), .groups = "drop") %>%
+  pivot_wider(names_from = symbol, values_from = value)
+
+sp500 <- tq_get("^GSPC", from = "1959-01-01", to = "2025-02-01") %>%
+  select(date, adjusted) %>%
+  mutate(qtryear = as.yearqtr(date)) %>%
+  group_by(qtryear) %>%
+  summarise(SP500 = mean(adjusted), .groups = "drop") %>%
+  arrange(qtryear)
+
+# Merge datasets and drop missing values
+data_combined <- left_join(data, sp500, by = "qtryear") %>%
+  rename(GDP = GDP) %>%  # Only needed if GDP is not named correctly
+  arrange(qtryear) %>%
+  mutate(
+    SP500_RET = c(NA, diff(log(SP500)) * 100),
+    GDP_GROWTH = c(NA, diff(log(GDP)) * 100),
+    UNRATE_DIFF = c(NA, diff(UNRATE))
+  ) %>%
+  na.omit()
+
+
+# UNRATE plot
+p1 <- ggplot(data_combined, aes(x = qtryear, y = UNRATE_DIFF)) +
+  geom_line(color = "darkred") +
+  labs(title = "Unemployment Rate Over Time", x = "Date", y = "Unemployment Rate") +
+  theme_minimal()
+
+p2 <- ggplot(data_combined, aes(x = qtryear, y = GDP_GROWTH)) +
+  geom_line(color = "darkgreen") +
+  labs(title = "GDP Over Time", x = "Date", y = "GDP") +
+  theme_minimal()
+
+p3 <- ggplot(data_combined, aes(x = qtryear, y = SP500_RET)) +
+  geom_line(color = "navy") +
+  labs(title = "S&P 500 Returns Over Time", x = "Date", y = "% Return") +
+  theme_minimal()
+
+p1 / p2/ p3
+
+```
+
+### \hspace*{2em} The data used was the US unemployment rate, GDP growth rate, and the S&P 500 returns.Both unemployment rate and GDP were obtained from the _Federal Reserve Bank of ST. Louis (FRED)_, S&P 500 returns were obtained from _Yahoo Finance_. The data used ranged from 1960 to 2025. In order to normalize my data I created new variables 'GDP_GROWTH' and 'SP500_RET' which take the log difference of each in order to convert them into rate changes over time. New variable 'UNRATE_DIFF' was also created which measured the change in unemployment rates over time. Based on the graphs above, the variables have different levels of volatility. Unemployment rates appear to have the lowest volatility among the three variables while the S&P returns appear to be the most volatile. We can also clearly see the effects of the 2020 COVID pandemic on both the unemployment rates and GDP growth rate, however there is no clear shock in the S&P 500 returns.
+
+```{r, results='asis', echo=FALSE, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(fig.align = 'center', out.extra = '', fig.width = 6, fig.height = 3)
+# (b) Test the data for stationarity using the methods covered in class. Plot the time series data to make visual inspection of the data. Discuss the results of your stationarity tests
+
+# ERS test for stationarity
+ers_unrate <- ur.ers(data_combined$UNRATE_DIFF, type = "DF-GLS")
+ers_gdp <- ur.ers(data_combined$GDP_GROWTH, type = "DF-GLS")
+ers_sp500 <- ur.ers(data_combined$SP500_RET, type = "DF-GLS")
+
+# Extract values for UNRATE 
+test_stats <- c(
+  level_unrate = ers_unrate@teststat,
+  level_GDP = ers_gdp@teststat,
+  level_sp500 = ers_sp500@teststat)
+
+# Critical values (they are the same for all tests so we can use one)
+crit_vals <-ers_unrate@cval
+
+# Combine into summary table
+ers_results <- tibble(
+  Variable = c("UNRATE", "GDP", "SP500"),
+  Transformation = c("Level", "Level", "Level"),
+  Test_Statistic = round(as.numeric(test_stats), 4),
+  Critical_1pct = crit_vals[1, 1],
+  Critical_5pct = crit_vals[1, 2],
+  Critical_10pct = crit_vals[1, 3])
+
+
+# Display nicely
+kable(ers_results, caption = "ERS Unit Root Test Results (DF-GLS)")
+```
+
+### \hspace*{2em} In order for VAR modeling we must first test for stationarity using the _ERS Unit Root Test (DF-GLS)_. Based on the result from _Table 1_, UNRATE has a t statistic of -2.99 which is lower than the critical values at 1%, 5%, and 10%. This means that we can reject the null hypothesis meaning that UNRATE is stationary. GDP has a t statistic of -3.49 is also lower than the critical values. We also reject the null hypothesis making the GPD stationary. The t statistic for the SP500 is -6.64 meaning we can also reject the null hypothesis based on the critical values. The SP500 rate is also stationary. This means that all three variables are stationary and nothing further should be done before moving on to creating a VAR model. 
+
+### \hspace*{2em} After confirming that the variables are stationary we can proceed to estimate VAR models. The first step is to transform data into time series data. After transforming we use the 'VARselect' command in order to find the optimal lag number using the Akaike Information Criterion (AIC). Using the VAR model we will be able to see whether the unemployment rate, GDP growth and past S&P 500 returns affect future S&P 500 results.
+```{r, echo=FALSE, warning = FALSE}
+# (c) Estimate a bivariate reduced form VAR for your data, use information criteria to select number of lags
+
+# Prepare VAR data
+data_ts <- ts(data_combined[, c("SP500_RET", "UNRATE_DIFF", "GDP_GROWTH")], start = c(1960, 1), frequency = 4)
+
+
+#### VAR #### 
+
+lag_crit <- VARselect(data_ts, lag.max = 8, type = "const")
+best_lag <- lag_crit$selection["AIC(n)"]
+
+# Estimate best VAR model
+var1 <- VAR(data_ts, p = best_lag, type = "const")
+var_summary <- summary(var1)
+var_table <- lapply(var_summary$varresult, tidy)
+
+# Make into clean table
+important_vars <- c("UNRATE_DIFF", "GDP_GROWTH","SP500_RET")
+filtered_sp500 <- var_table$SP500_RET %>%
+  filter(str_detect(term, paste(important_vars, collapse = "|")))
+
+# Display cleaned table
+filtered_sp500 %>% 
+  select(term, estimate, statistic, p.value) %>% 
+  kable(caption = "VAR Coefficients Affecting S&P 500 Returns")
+```
+
+### Based on _Table 2_ above it appears that SP500_RET has a coefficient of .3648 and a p-value of 0 which means that it is significant. Based on this we can infer that past S&P 500 returns have an influence on current or future S&P 500 returns. _Table 2_ also shows that under none of the tested lags is UNRATE_DIFF and GDP_GROWTH significant. The lowest p-value is .24 which is not statistically significant meaning that we cannot reject the null hypothesis. Based on the lags tested it appears that past unemployment rates and GDP growths do not significantly affect future or current S&P 500 returns. Based on the information gathered from _Table 2_ past S&P 500 returns is the only of the three variables to drive future and current returns.
+
+### \hspace*{2em} In order to further test the relationship between unemployment rate, GDP growth, and S&P 500 returns we must also generate Impulse Response Functions (IRF) using the previously estimated VAR model. For these IRF's 12 the VAR model was used to test the effects of a shock in one variable on other variables, they were tested 12 quarters ahead. 
+
+```{r, echo=FALSE}
+# (d) Gernerate Impulse Response Functions (IRFs) and plot them. Explain the results from IRF
+
+# Plot
+irf_unrate <- irf(var1,
+                  impulse = c("UNRATE_DIFF"),
+                  response = c("SP500_RET", "UNRATE_DIFF", "GDP_GROWTH"),
+                  n.ahead = 12,
+                  boot = TRUE,
+                  ci = 0.95)
+plot(irf_unrate)
+```
+
+### Based on the _Orthogonal Impulse Response form UNRATE_DIFF_ graph it appears that a negative shock to UNRATE_DIFF has a positive response in SP500_RET that reaches its peak in the first quarter that is not statistically significant. The overall shock only lasts about 5 quarters which implies that a shock in the unemployment rate has a delayed and short term shock in S&P 500 returns. When looking at GDP_GROWTH there appears to be a positive shock in the first quarter, and overall shock lasts 2 quarters. This shock is statistically insignificant. The results of these IRF graphs suggest that a negative shock in the unemployment rate is not significant and thus does not drive current or future movements in S&P 500 returns or GDP growth. 
+
+```{r, echo=FALSE}
+irf_GDP <- irf(var1,
+                  impulse = c("GDP_GROWTH"),
+                  response = c("SP500_RET", "UNRATE_DIFF", "GDP_GROWTH"),
+                  n.ahead = 12,
+                  boot = TRUE,
+                  ci = 0.95)
+plot(irf_GDP)
+```
+
+### Based on the _Orthogonal Impulse Response from GDP_GROWTH_ a negative shock to GDP_GROWTH there is a shock on the S&P 500 returns that lasts about six quarters, however, it is not statistically significant. There is also a slight negative shock in the unemployment rate that only lasts about one quarter that is also statistically insignificant. This implies that a shock the GDP growth does not significantly affect the unemployment rate or S&P 500 in the short run.
+
+```{r,echo=FALSE}
+irf_sp500 <- irf(var1,
+                  impulse = c("SP500_RET"),
+                  response = c("SP500_RET", "UNRATE_DIFF", "GDP_GROWTH"),
+                  n.ahead = 12,
+                  boot = TRUE,
+                  ci = 0.95)
+plot(irf_sp500)
+```
+
+### Finally, based on the _Orthogonal Impulse Response from SP500_RET_ graph when there is a negative shock in the S&P 500 return there is no shock to the unemployment rate, It also appears that a shock in the stock returns has no effect on GDP growth. Overall it appears that unemployment rate and GDP growth have no significant impact on the S&P 500 stock return ans vise versa. 
+
+```{r , echo=FALSE}
+# (e) Run the Granger causality tests for both variables. What do the results suggest about the predictive power of the two variables? Discuss the economic intution behind your results of Granger causality test
+
+# Granger causality test: Does UNRATE Granger-cause SP500_RET?
+granger_unrate <- causality(var1, cause = "UNRATE_DIFF")
+
+# Granger causality test: Does GDP Granger-cause SP500_RET?
+granger_gdp <- causality(var1, cause = "GDP_GROWTH")
+
+# Extract results into a table
+granger_table <- tibble(
+  Cause = c("UNRATE_DIFF", "GDP_GROWTH"),
+  F_statistic = c(granger_unrate$Granger$statistic, granger_gdp$Granger$statistic),
+  P_value     = c(granger_unrate$Granger$p.value, granger_gdp$Granger$p.value)
+) %>%
+  mutate(across(where(is.numeric), ~ round(.x, 4)))
+
+kable(granger_table, caption="Granger Casualty Test Results")
+```
+
+### \hspace*{2em} In order to further test the relationship between the three variables a Granger causality test using the previous VAR model is used to check for the predictive power that the unemployment rate and GDP growth have on the S&P 500 stock return. In _Table 3_ UNRATE_DIFF has an F-statistic of 6.75 and a p-value of 0, this indicates that it is statistically significant. Based on this we can conclude that UNRATE_DIFF has predictive power on future S&P 500 returns. _Table 3_ also indicates that GDP_GROWTH has an F_statistic of 1.94 and p-value of .0502, this indicates that it is not statistically significant. We can come to the conclusion that GDP_GROWTH has no predictive power over future S&P 500 returns. While the results of GDP_GROWTH correlate with previous results, the results of UNRATE_DIFF do not correlate with previous results. This could mean that there might be a small indirect response from a change in UNRATE_DIFF. This correlation might come from changes in unemployment rate being correlated to changes in investor expectations, changes in expectations might have a more direct impact on changes in S&P 500 returns.
+
+```{r, echo= FALSE}
+# (f) Estimate a structural VAR model using Cholesky decomposition, ensuring that you order your variables appropriately. Provide a theoretical explanation for your chosen ordering. (Remember: The ordering of variables is crucial in Cholesky decomposition as it imposes a recursive structure on the error terms.This ordering reflects the causal assumptions about the contemporaneous relationships)
+
+# reorder data
+data_ts2 <- ts(data_combined[, c("UNRATE_DIFF", "GDP_GROWTH", "SP500_RET")],
+              start = c(1960, 1), frequency = 4)
+
+# Re estimate VAR with new ordering
+lag_crit2 <- VARselect(data_ts, lag.max = 8, type = "const")
+best_lag2 <- lag_crit2$selection["AIC(n)"]
+
+var2 <- VAR(data_ts2, p = best_lag2, type = "const")
+```
+
+### \hspace*{2em} The last steps to test the relationship between unemployment rate, GDP growth, and S&P 500 returns is to use structural VAR model using Cholesky decomposition. When using Cholesky decomposition it is important to use proper ordering of the variables, in this case the variables were ordered UNRATE_DIFF, GDP_GROWTH, and SP500_RET. This would test wether shocks in unemployment rate affect GDP growth and S&P 500 market returns at the same time. This is important in order to test whether unemployment rate creates a chain reaction which would affect GDP growth and then market returns.
+
+\newpage
+
+```{r, echo=FALSE}
+# (g) Generate IRFs from the SVAR analysis and explain your results.
+
+# Plot IRFs
+var2_irf <- irf(var2,
+                  impulse = c("UNRATE_DIFF","SP500_RET","GDP_GROWTH"),
+                  response = c("SP500_RET", "UNRATE_DIFF", "GDP_GROWTH"),
+                  n.ahead = 12,
+                  boot = TRUE,
+                  ci = 0.95)
+plot(var2_irf)
+```
+
+### Next IRF's were generated using Cholesky decomposition ordering. By looking at the graphs above we see that when there is a shock in UNRATE_DIFF there is a positive shock in both GPD_GROWTH and SP500_RET, however they are both statistically insignificant. This implies that a change in UNRATE_DIFF does not have an impact on GDP growth or S&P 500 returns. When looking at the next graph which tests the impacts of a shock in GDP_GROWTH, there is a negative shock in both UNRATE_DIFF and SP500_RET, however, they are both statistically insignificant. However, the graph indicates that GDP_GROWTH has a short term significant shock on its own growth. Moving on to the next graph we see that a shock in SP500_RET has no significant shock in UNRATE_DIFF and GDP_GROWTH.The graph also implies that SP500_RET has a significant short term impact on itself within the first 2 quarters. 
+
+### \hspace*{2em} In conclusion, the unemployment rate and GDP growth have little to no influence on S&P 500 returns. However, a shock in S&P 500 returns has a significant effect on current and future S&P 500 returns. While stocks in market returns have a shock on itself they do not appear to have significant effects on unemployment rates and GDP growth. This indicates that unemployment rates and GDP growth have virtually no predictive power over current and future market returns. This indicates that while these macroeconomic indicators might see shocks, they move independently from each other.
+
+\newpage
+
+\begin{center}
+\textbf{Works Cited}
+\end{center}
+
+### Federal Reserve Bank of St. Louis. (n.d.). Civilian Unemployment Rate [UNRATE] [Data 
+### \hspace*{2em} set].FRED, Federal Reserve Bank of St. Louis. https://fred.stlouisfed.org/series/
+### \hspace*{2em} UNRATE
+### Federal Reserve Bank of St. Louis. (n.d.). Gross Domestic Product [GDP] [Data set]. FRED,
+### \hspace*{2em} Federal Reserve Bank of St. Louis. https://fred.stlouisfed.org/series/GDP
+### Federal Reserve Bank of St. Louis. (n.d.). S&P 500 [SP500] [Data set]. FRED, Federal
+### \hspace*{2em} Reserve Bank of St. Louis. https://fred.stlouisfed.org/series/SP500
